@@ -27,10 +27,48 @@ from torch import _C
 from torch.cuda import _lazy_call, device as device_ctx_manager
 #from torch.utils.checkpoint import detach_variable
 
+import habana_frameworks.torch.hpu.random as htrandom
 
 import torch.distributed as dist
 PARTITION_ACTIVATIONS = False
 PA_CORRECTNESS_TEST= False
+
+# try:
+#     import habana_frameworks.torch.core as htcore
+#     import habana_frameworks.torch.hpu as hthpu
+# except:
+#     print('INFO: no habana framework package installed')
+
+# import gc
+# import torch.distributed as dist
+
+# def see_memory_usage(message, force=True, use_hpu=False):
+#     if not force:
+#         return
+#     if dist.is_initialized() and not dist.get_rank() == 0:
+#         return
+
+#     # python doesn't do real-time garbage collection so do it explicitly to get the correct RAM reports
+#     gc.collect()
+
+#     # Print message except when distributed but not rank 0
+#     print(message)
+#     if use_hpu:
+#         print(
+#             f"MA {round(hthpu.memory_allocated() / (1024 * 1024),2 )} MB \
+#             Max_MA {round(hthpu.max_memory_allocated() / (1024 * 1024),2)} MB ")
+
+#         # get the peak memory to report correct data, so reset the counter for the next call
+#         hthpu.reset_peak_memory_stats()
+#     else:
+#         print(
+#             f"MA {round(torch.cuda.memory_allocated() / (1024 * 1024),2 )} MB \
+#             Max_MA {round(torch.cuda.max_memory_allocated() / (1024 * 1024),2)} MB")
+
+#         # get the peak memory to report correct data, so reset the counter for the next call
+#         if hasattr(torch.cuda, "reset_peak_memory_stats"):  # pytorch 1.4+
+#             torch.cuda.reset_peak_memory_stats()
+
 
 def see_memory_usage(message, force=False):
     if not force:
@@ -185,15 +223,87 @@ class CudaRNGStatesTracker:
             # And set the state to the original state we started with.
             _set_cuda_rng_state(orig_cuda_rng_state)
 
+class HpuRNGStatesTracker:
+    """Tracker for the HPU RNG states.
+
+    Using the `add` method, a cuda rng state is initialized based on
+    the input `seed` and is assigned to `name`. Later, by forking the
+    rng state, we can perform operations and return to our starting
+    cuda state.
+    """
+    def __init__(self):
+        # Map from a string name to the cuda rng state.
+        self.states_ = {}
+        # Seeds are just for book keeping and ensure no seed is set twice.
+        self.seeds_ = set()
+
+    def reset(self):
+        """Set to the initial state (no tracker)."""
+        self.states_ = {}
+        self.seeds_ = set()
+
+    def get_states(self):
+        """Get rng states. Copy the dictionary so we have direct
+        pointers to the states, not just a pointer to the dictionary."""
+        states = {}
+        for name in self.states_:
+            states[name] = self.states_[name]
+        return states
+
+    def set_states(self, states):
+        """Set the rng states. For efficiency purposes, we do not check
+        the size of seed for compatibility."""
+        self.states_ = states
+
+    def add(self, name, seed):
+        """Track the rng state."""
+        # Check seed is not already used.
+        if seed in self.seeds_:
+            raise Exception('seed {} already exists'.format(seed))
+        self.seeds_.add(seed)
+        # Check that state is not already defined.
+        if name in self.states_:
+            raise Exception('cuda rng state {} already exists'.format(name))
+        # Get the current rng state.
+        orig_rng_state = htrandom.get_rng_state()
+        # Set the new state and store it.
+        htrandom.manual_seed(seed)
+        self.states_[name] = htrandom.get_rng_state()
+        # Reset rng state to what it was.
+        htrandom.set_rng_state(orig_rng_state)
+
+    @contextlib.contextmanager
+    def fork(self, name=_MODEL_PARALLEL_RNG_TRACKER_NAME):
+        """Fork the hpu rng state, perform operations, and exit with
+        the original state."""
+        # Check if we have added the state
+        if name not in self.states_:
+            raise Exception('hpu rng state {} is not added'.format(name))
+        # Store current rng state.
+        orig_hpu_rng_state = htrandom.get_rng_state()
+        # Set rng state to the desired one
+        htrandom.set_rng_state(self.states_[name])
+        # Do the stuff we wanted to do.
+        try:
+            yield
+        finally:
+            # Update the current rng state for later use.
+            self.states_[name] = htrandom.get_rng_state()
+            # And set the state to the original state we started with.
+            htrandom.set_rng_state(orig_hpu_rng_state)
 
 # RNG tracker object.
 _CUDA_RNG_STATE_TRACKER = CudaRNGStatesTracker()
 
+_HPU_RNG_STATE_TRACKER = HpuRNGStatesTracker()
 
 def get_cuda_rng_tracker():
     """Get cuda rng tracker."""
     return _CUDA_RNG_STATE_TRACKER
 
+def get_hpu_rng_tracker():
+    """Get hpu rng tracker."""
+    return _HPU_RNG_STATE_TRACKER
 
 def model_parallel_cuda_manual_seed(seed):
     """Initialize model parallel cuda seed.
@@ -225,11 +335,13 @@ def model_parallel_cuda_manual_seed(seed):
                   torch.distributed.get_rank(), get_model_parallel_rank(),
                   get_data_parallel_rank(), model_parallel_seed,
                   data_parallel_seed), flush=True)
-    _CUDA_RNG_STATE_TRACKER.reset()
+    _HPU_RNG_STATE_TRACKER.reset()
     # Set the default state.
-    torch.cuda.manual_seed(data_parallel_seed)
+    # torch.cuda.manual_seed(data_parallel_seed)
+    import habana_frameworks.torch.hpu.random as htrandom
+    htrandom.manual_seed(data_parallel_seed)
     # and model parallel state.
-    _CUDA_RNG_STATE_TRACKER.add(_MODEL_PARALLEL_RNG_TRACKER_NAME,
+    _HPU_RNG_STATE_TRACKER.add(_MODEL_PARALLEL_RNG_TRACKER_NAME,
                                 model_parallel_seed)
 
 
@@ -292,10 +404,15 @@ class CheckpointFunction(torch.autograd.Function):
             if dist.get_rank()  == 0:
                 print(f"Partition Activations {PARTITION_ACTIVATIONS} and Correctness Check {PA_CORRECTNESS_TEST}")
             
-            cuda_device = torch.cuda.current_device()
+            # cuda_device = torch.cuda.current_device()
+
             #The transport stream is used to overlap the allgather communication for the activations
             #with the computation in the backward pass
-            transport_stream = torch.cuda.Stream(device=cuda_device)
+            # transport_stream = torch.cuda.Stream(device=cuda_device)
+
+            import habana_frameworks.torch as htorch
+            cuda_device = htorch.hpu.current_device()
+            transport_stream = htorch.hpu.Stream(device=cuda_device)
 
         if PARTITION_ACTIVATIONS:
             inputs = [item.detach().contiguous().view(-1).narrow(0, get_partition_start(item), get_partition_size(item)).clone() for item in args[:-1]]
@@ -305,9 +422,12 @@ class CheckpointFunction(torch.autograd.Function):
         inputs_cuda = [item.to(cuda_device) for item in args]
         
         # Copy the rng states.
+        import habana_frameworks.torch.hpu.random as htrandom
         ctx.fwd_cpu_rng_state = torch.get_rng_state()
-        ctx.fwd_cuda_rng_state = torch.cuda.get_rng_state()
-        ctx.fwd_cuda_rng_state_tracker = get_cuda_rng_tracker().get_states()
+        # ctx.fwd_cuda_rng_state = torch.cuda.get_rng_state()
+        ctx.fwd_cuda_rng_state = htrandom.get_rng_state()
+        # ctx.fwd_cuda_rng_state_tracker = get_cuda_rng_tracker().get_states()
+        ctx.fwd_cuda_rng_state_tracker = get_hpu_rng_tracker().get_states()
 
         #ctx.save_for_backward(*args)
         with torch.no_grad():
@@ -346,13 +466,18 @@ class CheckpointFunction(torch.autograd.Function):
 
         # Store the current states.
         bwd_cpu_rng_state = torch.get_rng_state()
-        bwd_cuda_rng_state = torch.cuda.get_rng_state()
-        bwd_cuda_rng_state_tracker = get_cuda_rng_tracker().get_states()
+        # bwd_cuda_rng_state = torch.cuda.get_rng_state()
+        # bwd_cuda_rng_state_tracker = get_cuda_rng_tracker().get_states()
+        import habana_frameworks.torch.hpu.random as htrandom
+        bwd_cuda_rng_state = htrandom.get_rng_state()
+        bwd_cuda_rng_state_tracker = get_hpu_rng_tracker().get_states()
 
         # Set the states to what it used to be before the forward pass.
         torch.set_rng_state(ctx.fwd_cpu_rng_state)
-        _set_cuda_rng_state(ctx.fwd_cuda_rng_state)
-        get_cuda_rng_tracker().set_states(ctx.fwd_cuda_rng_state_tracker)
+        # _set_cuda_rng_state(ctx.fwd_cuda_rng_state)
+        _set_hpu_rng_state(ctx.fwd_cuda_rng_state)
+        # get_cuda_rng_tracker().set_states(ctx.fwd_cuda_rng_state_tracker)
+        get_hpu_rng_tracker().set_states(ctx.fwd_cuda_rng_state_tracker)
         
         if PARTITION_ACTIVATIONS:
             current_stream=torch.cuda.current_stream()
@@ -363,8 +488,11 @@ class CheckpointFunction(torch.autograd.Function):
 
         # Set the states back to what it was at the start of this function.
         torch.set_rng_state(bwd_cpu_rng_state)
-        _set_cuda_rng_state(bwd_cuda_rng_state)
-        get_cuda_rng_tracker().set_states(bwd_cuda_rng_state_tracker)
+        # _set_cuda_rng_state(bwd_cuda_rng_state)
+        _set_hpu_rng_state(bwd_cuda_rng_state)
+        # get_cuda_rng_tracker().set_states(bwd_cuda_rng_state_tracker)
+        get_hpu_rng_tracker().set_states(bwd_cuda_rng_state_tracker)
+
 
         if isinstance(outputs, torch.Tensor):
             outputs = (outputs,)
@@ -375,7 +503,10 @@ class CheckpointFunction(torch.autograd.Function):
 def checkpoint(function, *args):
     """Checkpoint a model or part of the model.
     This has been directly copied from torch.utils.checkpoint."""
-    return CheckpointFunction.apply(function, *args)
+    # return CheckpointFunction.apply(function, *args)
+    import deepspeed
+    return deepspeed.checkpointing.checkpoint(function, *args)
+
 
 def partition_activations_in_checkpoint(partition_activation):
     global PARTITION_ACTIVATIONS

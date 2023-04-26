@@ -28,6 +28,7 @@ from pretrain_glm import initialize_distributed
 from pretrain_glm import set_random_seed
 from configure_data import make_data_loader
 
+import habana_frameworks.torch.core as htcore
 
 def process_batch(batch, args):
     """Process batch and produce inputs for the model."""
@@ -52,7 +53,7 @@ def process_batch(batch, args):
     data_b = mpu.broadcast_data(keys, batch, datatype)
 
     if "padding_mask" in data_b:
-        attention_mask = data_b['padding_mask'].float().cuda().contiguous()
+        attention_mask = data_b['padding_mask'].float().to("hpu").contiguous()
         if args.fp16:
             attention_mask = attention_mask.half()
         data_b["padding_mask"] = attention_mask
@@ -68,7 +69,7 @@ def mix_forward_step(batch_and_dataloader, model, args, times, mems):
         if mpu.get_model_parallel_rank() == 0:
             if random.random() > 1 / (1 + args.block_lm_ratio):
                 use_blocklm = 1
-        use_blocklm = torch.cuda.LongTensor([use_blocklm])
+        use_blocklm = torch.LongTensor([use_blocklm]).to("hpu")
         torch.distributed.broadcast(use_blocklm, mpu.get_model_parallel_src_rank(),
                                     group=mpu.get_model_parallel_group())
         use_blocklm = use_blocklm.item()
@@ -298,9 +299,9 @@ def finetune(args, train_valid_datasets_provider, model_kwargs, forward_step=fin
             train_dataloader, valid_dataloader = _build_train_valid_dataloaders(train_dataset, valid_dataset, args)
             if args.no_validation:
                 valid_dataloader = None
-            train_iters = torch.cuda.LongTensor([len(train_dataloader)])
+            train_iters = torch.LongTensor([len(train_dataloader)]).to("hpu")
         else:
-            train_iters = torch.cuda.LongTensor([0])
+            train_iters = torch.LongTensor([0]).to("hpu")
         torch.distributed.broadcast(train_iters, mpu.get_model_parallel_src_rank(),
                                     group=mpu.get_model_parallel_group())
         if mpu.get_model_parallel_rank() != 0:
@@ -363,15 +364,15 @@ def finetune(args, train_valid_datasets_provider, model_kwargs, forward_step=fin
                 num_task_tokens = len(task_tokens)
             else:
                 num_task_tokens, task_tokens = 0, []
-            num_task_tokens = torch.cuda.LongTensor([num_task_tokens])
+            num_task_tokens = torch.LongTensor([num_task_tokens]).to("hpu")
             torch.distributed.broadcast(num_task_tokens, mpu.get_model_parallel_src_rank(),
                                         group=mpu.get_model_parallel_group())
             num_task_tokens = num_task_tokens.item()
             if num_task_tokens > 0:
                 if mpu.get_model_parallel_rank() == 0:
-                    task_tokens = torch.cuda.LongTensor(task_tokens)
+                    task_tokens = torch.LongTensor(task_tokens).to("hpu")
                 else:
-                    task_tokens = torch.empty(num_task_tokens, device=torch.cuda.current_device(), dtype=torch.long)
+                    task_tokens = torch.empty(num_task_tokens, device="hpu", dtype=torch.long)
                 torch.distributed.broadcast(task_tokens, mpu.get_model_parallel_src_rank(),
                                             group=mpu.get_model_parallel_group())
                 task_tokens = task_tokens.tolist()

@@ -477,10 +477,13 @@ def initialize_distributed(args):
     """Initialize torch.distributed."""
 
     # Manually set the device ids.
-    device = args.rank % torch.cuda.device_count()
+    # device = args.rank % torch.cuda.device_count()
+    import habana_frameworks.torch.hpu as hthpu
+    device = args.rank % hthpu.device_count()
+
     if args.local_rank is not None:
         device = args.local_rank
-    torch.cuda.set_device(device)
+    # torch.cuda.set_device(device)
     # Call the init process
     init_method = 'tcp://'
     args.master_ip = os.getenv('MASTER_ADDR', 'localhost')
@@ -489,6 +492,7 @@ def initialize_distributed(args):
     if hasattr(deepspeed, "init_distributed"):
         deepspeed.init_distributed(dist_backend=args.distributed_backend)
     else:
+        import habana_frameworks.torch.distributed.hccl
         torch.distributed.init_process_group(
             backend=args.distributed_backend,
             world_size=args.world_size, rank=args.rank,

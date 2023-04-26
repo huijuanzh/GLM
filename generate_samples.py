@@ -32,6 +32,7 @@ import mpu
 from train_utils import get_model
 from generation_utils import top_k_logits
 
+import habana_frameworks.torch.core as htcore
 
 def setup_model(args):
     """Setup model and optimizer."""
@@ -56,6 +57,11 @@ def setup_model(args):
     # if args.deepspeed:
     #     model = model.module
 
+    # if args.hmp:
+    #     from habana_frameworks.torch.hpex import hmp
+    #     hmp.convert(bf16_file_path=args.hmp_bf16_ops, fp32_file_path=args.hmp_fp32_ops, isVerbose=args.hmp_verbose)
+    import habana_frameworks.torch as ht
+    model = ht.hpu.wrap_in_hpu_graph(model)
     return model
 
 
@@ -123,6 +129,7 @@ def sample_sequence(model, tokenizer, context_tokens, context_length, args, devi
                 attention_mask = context_tokens.new_ones(last_beam_num, 1, 1, args.mem_length + 1,
                                                          device=context_tokens.device, dtype=torch.float)
             last_token = tokens[:, -1:]
+            print(f"forward {context_length}, {counter}")
             next_token_logits, *mems = model(last_token, position_ids, attention_mask, *mems)
         next_token_logits = next_token_logits[:, -1]
         if args.num_beams > 1:
@@ -159,10 +166,14 @@ def sample_sequence(model, tokenizer, context_tokens, context_length, args, devi
                 break
             last_beam_num = args.num_beams
         else:
-            next_token_logits /= args.temperature
+            # next_token_logits /= args.temperature
+            next_token_logits = next_token_logits / args.temperature
+
             next_token_logits = top_k_logits(next_token_logits, top_k=args.top_k, top_p=args.top_p)
             log_probs = F.softmax(next_token_logits, dim=-1)
             prev = torch.multinomial(log_probs, num_samples=1)[0]
+            # prev = torch.argmax(next_token_logits, dim=-1)
+
             is_end = prev.item() in end_tokens
             if is_end:
                 break
@@ -212,7 +223,8 @@ def read_context(tokenizer, args, output):
     else:
         context_length = 0
 
-    terminate_runs_tensor = torch.cuda.LongTensor([terminate_runs])
+    # terminate_runs_tensor = torch.cuda.LongTensor([terminate_runs])
+    terminate_runs_tensor = torch.LongTensor([terminate_runs]).to("hpu")
     torch.distributed.broadcast(terminate_runs_tensor, mpu.get_model_parallel_src_rank(),
                                 group=mpu.get_model_parallel_group())
     terminate_runs = terminate_runs_tensor[0].item()
@@ -220,15 +232,18 @@ def read_context(tokenizer, args, output):
     if terminate_runs == 1:
         return terminate_runs, None, None, None
 
-    context_length_tensor = torch.cuda.LongTensor([context_length])
+    # context_length_tensor = torch.cuda.LongTensor([context_length])
+    context_length_tensor = torch.LongTensor([context_length]).to("hpu")
 
     torch.distributed.broadcast(context_length_tensor, mpu.get_model_parallel_src_rank(),
                                 group=mpu.get_model_parallel_group())
     context_length = context_length_tensor[0].item()
     if mpu.get_model_parallel_rank() == 0:
-        context_tokens_tensor = torch.cuda.LongTensor(context_tokens)
+        # context_tokens_tensor = torch.cuda.LongTensor(context_tokens)
+        context_tokens_tensor = torch.LongTensor(context_tokens).to("hpu")
     else:
-        context_tokens_tensor = torch.cuda.LongTensor([0] * context_length)
+        # context_tokens_tensor = torch.cuda.LongTensor([0] * context_length)
+        context_tokens_tensor = torch.LongTensor([0] * context_length).to("hpu")
     torch.distributed.broadcast(context_tokens_tensor, mpu.get_model_parallel_src_rank(),
                                 group=mpu.get_model_parallel_group())
     if mpu.get_model_parallel_rank() != 0:
@@ -242,7 +257,7 @@ def generate_samples(model, tokenizer, args, device):
     if not os.path.exists(output_path):
         os.makedirs(output_path)
     output_path = os.path.join(output_path, f"sample-{datetime.now().strftime('%m-%d-%H-%M')}.txt")
-    with torch.no_grad(), open(output_path, "w") as output:
+    with torch.no_grad(), open(output_path, "w") as output, torch.autocast("hpu", dtype=torch.float16, enabled=True):
         while True:
             torch.distributed.barrier(group=mpu.get_model_parallel_group())
 
@@ -314,7 +329,8 @@ def main():
     args.batch_size = 1
 
     # generate samples
-    generate_samples(model, tokenizer, args, torch.cuda.current_device())
+    # generate_samples(model, tokenizer, args, torch.cuda.current_device())
+    generate_samples(model, tokenizer, args, torch.device("hpu"))
 
 
 if __name__ == "__main__":

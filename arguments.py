@@ -187,8 +187,8 @@ def add_training_args(parser):
                             'with a different seed in this case.')
     # distributed training args
     group.add_argument('--distributed-backend', default='nccl',
-                       help='which backend to use for distributed training. One of [gloo, nccl]',
-                       choices=['nccl', 'gloo'])
+                       help='which backend to use for distributed training. One of [gloo, nccl, hccl]',
+                       choices=['nccl', 'gloo', 'hccl'])
     group.add_argument('--DDP-impl', default='torch', choices=['local', 'torch', 'none'],
                        help='which DistributedDataParallel implementation to use.')
 
@@ -394,6 +394,17 @@ def add_finetune_config_args(parser):
     group.add_argument('--mask-pad-token', action='store_true')
     return parser
 
+def add_hpu_config_args(parser):
+    """Habana arguments."""
+
+    group = parser.add_argument_group('hpu', 'habana configurations')
+
+    group.add_argument('--hmp', action='store_true',
+                       help='Run model in hmp mode')
+    group.add_argument('--hmp-fp32-ops', type=str, default="./ops_fp32.txt", help='hmp fp32 op list')
+    group.add_argument('--hmp-bf16-ops', type=str, default="./ops_bf16.txt", help='hmp bf16 op list')
+    group.add_argument('--hmp-verbose', action='store_true', help='enable hmp verbose mode')
+    return parser
 
 def get_args():
     """Parse all the args."""
@@ -406,6 +417,7 @@ def get_args():
     parser = add_text_generate_args(parser)
     parser = add_data_args(parser)
     parser = add_finetune_config_args(parser)
+    parser = add_hpu_config_args(parser)
 
     # Include DeepSpeed configuration arguments
     parser = deepspeed.add_config_arguments(parser)

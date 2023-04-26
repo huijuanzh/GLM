@@ -19,7 +19,8 @@ import math
 
 import torch
 import torch.nn.init as init
-from apex.normalization.fused_layer_norm import FusedLayerNorm as LayerNorm
+# from apex.normalization.fused_layer_norm import FusedLayerNorm as LayerNorm
+from torch.nn import LayerNorm
 
 from .initialize import get_model_parallel_world_size
 from .layers import ColumnParallelLinear
@@ -309,8 +310,8 @@ class ParallelSelfAttention(torch.nn.Module):
         attention_probs = torch.nn.Softmax(dim=-1)(attention_scores)
         # This is actually dropping out entire tokens to attend to, which might
         # seem a bit unusual, but is taken from the original Transformer paper.
-        with get_cuda_rng_tracker().fork():
-            attention_probs = self.attention_dropout(attention_probs)
+        # with get_cuda_rng_tracker().fork():
+        #     attention_probs = self.attention_dropout(attention_probs)
 
         # Context layer.
         # [b, np, s, hn]

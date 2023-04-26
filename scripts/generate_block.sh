@@ -1,5 +1,5 @@
 #!/bin/bash
-CHECKPOINT_PATH=/zhangpai21/checkpoints
+CHECKPOINT_PATH=/root/Source2/GLM-Models
 
 source $1
 
@@ -22,7 +22,8 @@ python -m torch.distributed.launch --nproc_per_node=$MPSIZE --master_port $MASTE
        --DDP-impl none \
        --model-parallel-size $MPSIZE \
        $MODEL_ARGS \
-       --fp16 \
+       --hmp \
+       --distributed-backend hccl \
        --cache-dir cache \
        --out-seq-length $MAXSEQLEN \
        --seq-length 512 \

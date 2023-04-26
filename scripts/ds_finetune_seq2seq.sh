@@ -1,12 +1,12 @@
-DATA_ROOT=/root/data
-CHECKPOINT_PATH="/dataset/c07bd62b/finetune_checkpoints"
+DATA_ROOT=/root/Source2/GLM-dataset/cnn-dailymail
+CHECKPOINT_PATH="/root/Source2/GLM-Models"
 SAVE_PATH=/root/data/finetune_checkpoints
 DATESTR=$(date +"%m-%d-%H-%M")
 
 source $1    # Model
 source $2    # Task
 
-NUM_WORKERS=2
+NUM_WORKERS=1
 NUM_GPUS_PER_WORKER=8
 HOST_FILE_PATH="./hostfile"
 MP_SIZE=1
@@ -28,11 +28,12 @@ run_cmd="${DISTRIBUTED_ARGS} finetune_glm.py \
        --checkpoint-activations \
        --num-workers 1 \
        --no-load-lr-scheduler \
+       --distributed-backend hccl \
+       --use_hpu \
        $MODEL_ARGS \
        $TRAIN_ARGS \
        $COMMON_ARGS \
        $TASK_ARGS \
-       --fp16 \
        --model-parallel-size ${MP_SIZE} \
        --overwrite \
        2>&1 | tee logs/log-${EXPERIMENT_NAME}.txt"

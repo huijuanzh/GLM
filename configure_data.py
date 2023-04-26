@@ -138,9 +138,11 @@ def prepare_tokenizer(args):
         print_rank_0('> padded vocab (size: {}) with {} dummy '
                      'tokens (new size: {})'.format(before, after - before, after))
         print_rank_0('> found end-of-document token: {}'.format(eod_token))
-        token_counts = torch.cuda.LongTensor([after, eod_token])
+        # token_counts = torch.cuda.LongTensor([after, eod_token])
+        token_counts = torch.LongTensor([after, eod_token]).to("hpu")
     else:
-        token_counts = torch.cuda.LongTensor([0, 0])
+        # token_counts = torch.cuda.LongTensor([0, 0])
+        token_counts = torch.LongTensor([0, 0], device="hpu")
     # Broadcast num tokens.
     torch.distributed.broadcast(token_counts,
                                 mpu.get_model_parallel_src_rank(),

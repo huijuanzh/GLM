@@ -1,6 +1,7 @@
 import deepspeed
 import torch
-from apex.optimizers import FusedAdam as Adam
+# from apex.optimizers import FusedAdam as Adam
+from habana_frameworks.torch.hpex.optimizers import FusedAdamW as Adam
 from torch import distributed as dist
 
 import mpu
@@ -12,6 +13,7 @@ from model import PyTorchDistributedDataParallel as TorchDDP, DistributedDataPar
 from model.modeling_bert import BertForMultipleChoice, BertForSequenceClassification
 from utils import print_rank_0, get_checkpoint_name, get_checkpoint_iteration
 
+import habana_frameworks.torch.core as htcore
 
 def load_pretrained(model, checkpoint_path, args, task_tokens=None):
     load_dir, tag, release, success = get_checkpoint_iteration(checkpoint_path)
@@ -136,8 +138,12 @@ def get_model(args, model_type=None, multi_token=True, num_labels=None, spell_le
     if args.fp16:
         model.half()
 
+    if args.hmp:
+        model.half()
+
     # GPU allocation.
-    model.cuda(torch.cuda.current_device())
+    # model.cuda(torch.cuda.current_device())
+    model.to(torch.device("hpu"))
 
     # Fp16 conversion.
     if args.fp16:
@@ -258,6 +264,10 @@ def setup_model_and_optimizer(args, model_type=None, multi_token=True, num_label
                 mpu=mpu,
                 dist_init_required=False
             )
+
+            if args.checkpoint_activations:
+                deepspeed.checkpointing.configure(None, deepspeed_config=args.deepspeed_config, num_checkpoints=1)
+
         else:
             optimizer = get_optimizer(param_groups, args)
         lr_scheduler = get_learning_rate_scheduler(optimizer, args)
