@@ -69,7 +69,8 @@ def mix_forward_step(batch_and_dataloader, model, args, times, mems):
         if mpu.get_model_parallel_rank() == 0:
             if random.random() > 1 / (1 + args.block_lm_ratio):
                 use_blocklm = 1
-        use_blocklm = torch.LongTensor([use_blocklm]).to("hpu")
+        use_blocklm = torch.tensor([use_blocklm], device="hpu")
+        use_blocklm = use_blocklm.long()
         torch.distributed.broadcast(use_blocklm, mpu.get_model_parallel_src_rank(),
                                     group=mpu.get_model_parallel_group())
         use_blocklm = use_blocklm.item()
@@ -299,9 +300,11 @@ def finetune(args, train_valid_datasets_provider, model_kwargs, forward_step=fin
             train_dataloader, valid_dataloader = _build_train_valid_dataloaders(train_dataset, valid_dataset, args)
             if args.no_validation:
                 valid_dataloader = None
-            train_iters = torch.LongTensor([len(train_dataloader)]).to("hpu")
+            train_iters = torch.tensor([len(train_dataloader)], device="hpu")
+            train_iters = train_iters.long()
         else:
-            train_iters = torch.LongTensor([0]).to("hpu")
+            train_iters = torch.tensor([0], device="hpu")
+            train_iters = train_iters.long()
         torch.distributed.broadcast(train_iters, mpu.get_model_parallel_src_rank(),
                                     group=mpu.get_model_parallel_group())
         if mpu.get_model_parallel_rank() != 0:
@@ -364,13 +367,15 @@ def finetune(args, train_valid_datasets_provider, model_kwargs, forward_step=fin
                 num_task_tokens = len(task_tokens)
             else:
                 num_task_tokens, task_tokens = 0, []
-            num_task_tokens = torch.LongTensor([num_task_tokens]).to("hpu")
+            num_task_tokens = torch.tensor([num_task_tokens], device="hpu")
+            num_task_tokens = num_task_tokens.long()
             torch.distributed.broadcast(num_task_tokens, mpu.get_model_parallel_src_rank(),
                                         group=mpu.get_model_parallel_group())
             num_task_tokens = num_task_tokens.item()
             if num_task_tokens > 0:
                 if mpu.get_model_parallel_rank() == 0:
-                    task_tokens = torch.LongTensor(task_tokens).to("hpu")
+                    task_tokens = torch.tensor(task_tokens, device="hpu")
+                    task_tokens = task_tokens.long()
                 else:
                     task_tokens = torch.empty(num_task_tokens, device="hpu", dtype=torch.long)
                 torch.distributed.broadcast(task_tokens, mpu.get_model_parallel_src_rank(),

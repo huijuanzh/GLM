@@ -139,7 +139,8 @@ def prepare_tokenizer(args):
                      'tokens (new size: {})'.format(before, after - before, after))
         print_rank_0('> found end-of-document token: {}'.format(eod_token))
         # token_counts = torch.cuda.LongTensor([after, eod_token])
-        token_counts = torch.LongTensor([after, eod_token]).to("hpu")
+        token_counts = torch.tensor([after, eod_token], device="hpu")
+        token_counts = token_counts.long()
     else:
         # token_counts = torch.cuda.LongTensor([0, 0])
         token_counts = torch.tensor([0, 0], device="hpu")
